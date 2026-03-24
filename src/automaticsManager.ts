@@ -169,10 +169,20 @@ export default class AutomaticsManager {
                 if (this.plugin.settings.differentIntervalCommitAndPush) {
                     await this.plugin.commit({ fromAuto: true, onlyStaged });
                 } else {
-                    await this.plugin.commitAndSync({
-                        fromAutoBackup: true,
-                        onlyStaged,
-                    });
+                    if (
+                        this.plugin.repoManager &&
+                        this.plugin.repoManager.enabledReposCount > 1
+                    ) {
+                        await this.plugin.commitAndSyncAll({
+                            fromAutoBackup: true,
+                            onlyStaged,
+                        });
+                    } else {
+                        await this.plugin.commitAndSync({
+                            fromAutoBackup: true,
+                            onlyStaged,
+                        });
+                    }
                 }
                 return true;
             },
@@ -196,7 +206,16 @@ export default class AutomaticsManager {
 
     private doAutoPull(): void {
         this.plugin.promiseQueue.addTask(
-            () => this.plugin.pullChangesFromRemote(),
+            async () => {
+                if (
+                    this.plugin.repoManager &&
+                    this.plugin.repoManager.enabledReposCount > 1
+                ) {
+                    await this.plugin.pullAll();
+                } else {
+                    await this.plugin.pullChangesFromRemote();
+                }
+            },
             () => {
                 this.saveLastAuto(new Date(), "pull");
                 this.startAutoPull();
@@ -214,7 +233,16 @@ export default class AutomaticsManager {
 
     private doAutoPush(): void {
         this.plugin.promiseQueue.addTask(
-            () => this.plugin.push(),
+            async () => {
+                if (
+                    this.plugin.repoManager &&
+                    this.plugin.repoManager.enabledReposCount > 1
+                ) {
+                    await this.plugin.pushAll();
+                } else {
+                    await this.plugin.push();
+                }
+            },
             () => {
                 this.saveLastAuto(new Date(), "push");
                 this.startAutoPush();

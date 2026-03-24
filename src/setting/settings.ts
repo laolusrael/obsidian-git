@@ -941,6 +941,39 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                 });
             });
 
+        if (plugin.repoManager && plugin.repoManager.reposCount > 1) {
+            new Setting(containerEl).setName("Repositories").setHeading();
+
+            const repos = plugin.repoManager.getAllRepos();
+            for (const repo of repos) {
+                new Setting(containerEl)
+                    .setName(repo.name)
+                    .setDesc(repo.path)
+                    .addToggle((toggle) =>
+                        toggle
+                            .setValue(repo.enabled)
+                            .onChange(async (value) => {
+                                plugin.repoManager.setRepoEnabled(
+                                    repo.path,
+                                    value
+                                );
+                                await plugin.saveSettings();
+                            })
+                    );
+            }
+
+            new Setting(containerEl)
+                .setName("Refresh repositories")
+                .setDesc("Scan for new git repositories in the vault")
+                .addButton((cb) => {
+                    cb.setButtonText("Refresh");
+                    cb.onClick(async () => {
+                        await plugin.repoManager.reload();
+                        this.refreshDisplayWithDelay();
+                    });
+                });
+        }
+
         new Setting(containerEl)
             .setName("Disable on this device")
             .setDesc(

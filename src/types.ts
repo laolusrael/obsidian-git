@@ -1,5 +1,11 @@
 import type { LineAuthorSettings } from "src/editor/lineAuthor/model";
 
+export interface RepoConfig {
+    path: string;
+    enabled: boolean;
+    name: string;
+}
+
 export interface ObsidianGitSettings {
     commitMessage: string;
     autoCommitMessage: string;

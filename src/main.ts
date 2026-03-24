@@ -62,9 +62,12 @@ import {
 import { DiscardModal, type DiscardResult } from "./ui/modals/discardModal";
 import { HunkActions } from "./editor/signs/hunkActions";
 import { EditorIntegration } from "./editor/editorIntegration";
+import { RepoManager } from "./repoManager";
 
 export default class ObsidianGit extends Plugin {
     gitManager: GitManager;
+    gitManagers: Map<string, GitManager> = new Map();
+    repoManager: RepoManager;
     automaticsManager = new AutomaticsManager(this);
     tools = new Tools(this);
     localStorage = new LocalStorageSettings(this);
@@ -335,6 +338,24 @@ export default class ObsidianGit extends Plugin {
         );
     }
 
+    getGitManagerForFile(filePath: string): GitManager {
+        if (!this.repoManager) {
+            return this.gitManager;
+        }
+
+        const repo = this.repoManager.getRepoForFile(filePath);
+        if (!repo) {
+            return this.gitManager;
+        }
+
+        const manager = this.gitManagers.get(repo.path);
+        if (manager) {
+            return manager;
+        }
+
+        return this.gitManager;
+    }
+
     async addFileToGitignore(
         filePath: string,
         isFolder?: boolean
@@ -570,9 +591,18 @@ export default class ObsidianGit extends Plugin {
                         10000
                     );
                     break;
-                case "valid":
+                case "valid": {
                     this.gitReady = true;
                     this.setPluginState({ gitAction: CurrentGitAction.idle });
+
+                    this.repoManager = new RepoManager(this);
+                    const discoveredRepos =
+                        await this.repoManager.discoverRepos();
+                    if (discoveredRepos.length > 1) {
+                        this.log(
+                            `Multiple git repositories detected: ${discoveredRepos.map((r) => r.name).join(", ")}`
+                        );
+                    }
 
                     if (
                         Platform.isDesktop &&
@@ -621,6 +651,7 @@ export default class ObsidianGit extends Plugin {
                     }
 
                     break;
+                }
                 default:
                     this.log(
                         "Something weird happened. The 'checkRequirements' result is " +
@@ -834,6 +865,94 @@ export default class ObsidianGit extends Plugin {
             }
         }
         this.setPluginState({ gitAction: CurrentGitAction.idle });
+    }
+
+    async commitAndSyncAll({
+        fromAutoBackup,
+        requestCustomMessage = false,
+        commitMessage,
+        onlyStaged = false,
+    }: {
+        fromAutoBackup: boolean;
+        requestCustomMessage?: boolean;
+        commitMessage?: string;
+        onlyStaged?: boolean;
+    }): Promise<void> {
+        if (!this.repoManager) {
+            await this.commitAndSync({
+                fromAutoBackup,
+                requestCustomMessage,
+                commitMessage,
+                onlyStaged,
+            });
+            return;
+        }
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+        for (const repo of enabledRepos) {
+            const manager = this.gitManagers.get(repo.path);
+            if (!manager) continue;
+
+            const status = await manager.status();
+            const hasChanges =
+                status.staged.length > 0 ||
+                status.changed.length > 0 ||
+                status.conflicted.length > 0;
+
+            if (hasChanges) {
+                await this.commitAndSync({
+                    fromAutoBackup,
+                    requestCustomMessage,
+                    commitMessage,
+                    onlyStaged,
+                });
+            }
+        }
+    }
+
+    async pullAll(): Promise<void> {
+        if (!this.repoManager) {
+            await this.pull();
+            return;
+        }
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+        for (const repo of enabledRepos) {
+            const manager = this.gitManagers.get(repo.path);
+            if (!manager) continue;
+
+            try {
+                await manager.pull();
+            } catch (error) {
+                this.displayError(
+                    `Pull failed for repo ${repo.name}: ${error}`
+                );
+            }
+        }
+    }
+
+    async pushAll(): Promise<void> {
+        if (!this.repoManager) {
+            await this.push();
+            return;
+        }
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+        for (const repo of enabledRepos) {
+            const manager = this.gitManagers.get(repo.path);
+            if (!manager) continue;
+
+            try {
+                const canPush = await manager.canPush();
+                if (canPush) {
+                    await manager.push();
+                }
+            } catch (error) {
+                this.displayError(
+                    `Push failed for repo ${repo.name}: ${error}`
+                );
+            }
+        }
     }
 
     // Returns true if commit was successfully
