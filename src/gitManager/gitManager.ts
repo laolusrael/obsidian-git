@@ -10,13 +10,25 @@ import type {
     TreeItem,
     UnstagedFile,
 } from "../types";
+import type { GitOperationStrategy } from "../gitOperationStrategy";
 
 export abstract class GitManager {
     readonly plugin: ObsidianGit;
     readonly app: App;
+    protected _strategy: GitOperationStrategy;
+
     constructor(plugin: ObsidianGit) {
         this.plugin = plugin;
         this.app = plugin.app;
+        this._strategy = {} as GitOperationStrategy;
+    }
+
+    setStrategy(strategy: GitOperationStrategy): void {
+        this._strategy = strategy;
+    }
+
+    get strategy(): GitOperationStrategy {
+        return this._strategy;
     }
 
     abstract status(opts?: { path?: string }): Promise<Status>;

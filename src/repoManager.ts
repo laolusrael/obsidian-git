@@ -2,6 +2,8 @@ import type { FileSystemAdapter } from "obsidian";
 import * as fs from "fs/promises";
 import * as path from "path";
 import type ObsidianGit from "./main";
+import type { GitOperationStrategy } from "./gitOperationStrategy";
+import { DefaultStrategy, MultiRepoStrategy } from "./gitOperationStrategy";
 
 export interface DiscoveredRepo {
     path: string;
@@ -12,9 +14,18 @@ export interface DiscoveredRepo {
 export class RepoManager {
     private repos: Map<string, DiscoveredRepo> = new Map();
     private readonly plugin: ObsidianGit;
+    private strategies: Map<string, GitOperationStrategy> = new Map();
+    private defaultStrategy: GitOperationStrategy;
 
     constructor(plugin: ObsidianGit) {
         this.plugin = plugin;
+        // Initialize default strategy to vault root
+        const adapter = this.plugin.app.vault.adapter as FileSystemAdapter;
+        const vaultBasePath = adapter.getBasePath();
+        this.defaultStrategy = new DefaultStrategy(
+            vaultBasePath,
+            vaultBasePath
+        );
     }
 
     async discoverRepos(): Promise<DiscoveredRepo[]> {
@@ -22,10 +33,54 @@ export class RepoManager {
         const vaultBasePath = adapter.getBasePath();
         const basePath = this.getBasePath(vaultBasePath);
 
+        console.log("[RepoManager] Scanning for repos:", {
+            vaultBasePath,
+            basePath,
+        });
+
         this.repos.clear();
+        this.strategies.clear();
         await this.scanForGitFolders(basePath, vaultBasePath);
 
+        // Create strategies for all discovered repos
+        for (const repo of this.repos.values()) {
+            this.strategies.set(
+                repo.path,
+                new MultiRepoStrategy(repo.path, vaultBasePath)
+            );
+        }
+
+        // Update default strategy to point to first discovered repo
+        const allRepos = this.getAllRepos();
+        if (allRepos.length > 0) {
+            this.defaultStrategy = new DefaultStrategy(
+                allRepos[0].path,
+                vaultBasePath
+            );
+        }
+
+        console.log("[RepoManager] Discovered repos:", this.getAllRepos());
         return this.getAllRepos();
+    }
+
+    getStrategyForRepo(repoPath: string): GitOperationStrategy {
+        return this.strategies.get(repoPath) || this.defaultStrategy;
+    }
+
+    getDefaultStrategy(): GitOperationStrategy {
+        return this.defaultStrategy;
+    }
+
+    hasMultipleRepos(): boolean {
+        return this.repos.size > 1;
+    }
+
+    getStrategyForFile(filePath: string): GitOperationStrategy {
+        const repo = this.getRepoForFile(filePath);
+        if (repo) {
+            return this.strategies.get(repo.path) || this.defaultStrategy;
+        }
+        return this.defaultStrategy;
     }
 
     private getBasePath(vaultBasePath: string): string {

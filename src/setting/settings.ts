@@ -941,7 +941,11 @@ export class ObsidianGitSettingsTab extends PluginSettingTab {
                 });
             });
 
-        if (plugin.repoManager && plugin.repoManager.reposCount > 1) {
+        if (
+            plugin.gitReady &&
+            plugin.repoManager &&
+            plugin.repoManager.reposCount > 1
+        ) {
             new Setting(containerEl).setName("Repositories").setHeading();
 
             const repos = plugin.repoManager.getAllRepos();
