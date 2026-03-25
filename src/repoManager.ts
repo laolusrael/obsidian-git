@@ -33,11 +33,6 @@ export class RepoManager {
         const vaultBasePath = adapter.getBasePath();
         const basePath = this.getBasePath(vaultBasePath);
 
-        console.log("[RepoManager] Scanning for repos:", {
-            vaultBasePath,
-            basePath,
-        });
-
         this.repos.clear();
         this.strategies.clear();
         await this.scanForGitFolders(basePath, vaultBasePath);
@@ -59,7 +54,6 @@ export class RepoManager {
             );
         }
 
-        console.log("[RepoManager] Discovered repos:", this.getAllRepos());
         return this.getAllRepos();
     }
 

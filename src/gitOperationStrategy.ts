@@ -1,5 +1,3 @@
-import type { SimpleGit } from "simple-git";
-
 export interface GitOperationStrategy {
     getRepoPath(): string;
     getVaultPath(): string;

@@ -118,11 +118,6 @@ export class SimpleGit extends GitManager {
 
                 this.absoluteRepoPath = absoluteRoot;
                 await this.git.cwd(absoluteRoot);
-            } else {
-                // No git repo at vault root - try to find one in subdirectories
-                console.log(
-                    "[SimpleGit] No repo at vault root, checking subdirectories..."
-                );
             }
 
             const absolutePluginConfigPath = path.join(

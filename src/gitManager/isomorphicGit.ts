@@ -198,12 +198,10 @@ export class IsomorphicGit extends GitManager {
         message,
         status,
         unstagedFiles,
-        repoPath,
     }: {
         message: string;
         status?: Status;
         unstagedFiles?: UnstagedFile[];
-        repoPath?: string;
     }): Promise<number | undefined> {
         try {
             await this.checkAuthorInfo();
@@ -218,11 +216,9 @@ export class IsomorphicGit extends GitManager {
 
     async commit({
         message,
-        repoPath,
     }: {
         message: string;
         amend?: boolean;
-        repoPath?: string;
     }): Promise<undefined> {
         try {
             await this.checkAuthorInfo();
@@ -280,12 +276,10 @@ export class IsomorphicGit extends GitManager {
         dir,
         status,
         unstagedFiles,
-        repoPath,
     }: {
         dir?: string;
         status?: Status;
         unstagedFiles?: UnstagedFile[];
-        repoPath?: string;
     }): Promise<void> {
         try {
             if (status) {
@@ -339,11 +333,9 @@ export class IsomorphicGit extends GitManager {
     async unstageAll({
         dir,
         status,
-        repoPath,
     }: {
         dir?: string;
         status?: Status;
-        repoPath?: string;
     }): Promise<void> {
         try {
             let staged: string[];

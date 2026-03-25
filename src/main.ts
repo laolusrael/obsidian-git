@@ -168,11 +168,6 @@ export default class ObsidianGit extends Plugin {
     async refresh() {
         if (!this.gitReady) return;
 
-        console.log("[ObsidianGit] Refresh triggered", {
-            hasRepoManager: !!this.repoManager,
-            reposCount: this.repoManager?.enabledReposCount,
-        });
-
         const gitViews = this.app.workspace.getLeavesOfType(
             SOURCE_CONTROL_VIEW_CONFIG.type
         );
@@ -302,12 +297,9 @@ export default class ObsidianGit extends Plugin {
         this.registerEvent(
             this.app.vault.on("modify", () => {
                 try {
-                    console.log(
-                        "[ObsidianGit] File modified, triggering refresh"
-                    );
                     this.debRefresh();
                     this.autoCommitDebouncer?.();
-                } catch (e) {
+                } catch {
                     // Ignore errors during unload
                 }
             })
@@ -317,7 +309,7 @@ export default class ObsidianGit extends Plugin {
                 try {
                     this.debRefresh();
                     this.autoCommitDebouncer?.();
-                } catch (e) {
+                } catch {
                     // Ignore errors during unload
                 }
             })
@@ -327,7 +319,7 @@ export default class ObsidianGit extends Plugin {
                 try {
                     this.debRefresh();
                     this.autoCommitDebouncer?.();
-                } catch (e) {
+                } catch {
                     // Ignore errors during unload
                 }
             })
@@ -337,7 +329,7 @@ export default class ObsidianGit extends Plugin {
                 try {
                     this.debRefresh();
                     this.autoCommitDebouncer?.();
-                } catch (e) {
+                } catch {
                     // Ignore errors during unload
                 }
             })
@@ -400,7 +392,7 @@ export default class ObsidianGit extends Plugin {
                     if (this.settings.refreshSourceControl) {
                         this.refresh().catch(console.error);
                     }
-                } catch (e) {
+                } catch {
                     // Ignore errors during unload
                 }
             },
