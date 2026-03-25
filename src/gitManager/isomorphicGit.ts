@@ -148,7 +148,7 @@ export class IsomorphicGit extends GitManager {
         }
     }
 
-    async status(opts?: { path?: string }): Promise<Status> {
+    async status(opts?: { path?: string; repoPath?: string }): Promise<Status> {
         let notice: Notice | undefined;
         const timeout = window.setTimeout(() => {
             notice = new Notice(

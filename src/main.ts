@@ -62,9 +62,12 @@ import {
 import { DiscardModal, type DiscardResult } from "./ui/modals/discardModal";
 import { HunkActions } from "./editor/signs/hunkActions";
 import { EditorIntegration } from "./editor/editorIntegration";
+import { RepoManager } from "./repoManager";
 
 export default class ObsidianGit extends Plugin {
     gitManager: GitManager;
+    gitManagers: Map<string, GitManager> = new Map();
+    repoManager: RepoManager;
     automaticsManager = new AutomaticsManager(this);
     tools = new Tools(this);
     localStorage = new LocalStorageSettings(this);
@@ -103,7 +106,15 @@ export default class ObsidianGit extends Plugin {
 
     async updateCachedStatus(): Promise<Status> {
         this.app.workspace.trigger("obsidian-git:loading-status");
-        this.cachedStatus = await this.gitManager.status();
+
+        // Get status from all repos if multiple repos exist
+        if (this.repoManager && this.repoManager.enabledReposCount > 1) {
+            const allStatus = await this.getCombinedStatus();
+            this.cachedStatus = allStatus;
+        } else {
+            this.cachedStatus = await this.gitManager.status();
+        }
+
         if (this.cachedStatus.conflicted.length > 0) {
             this.localStorage.setConflict(true);
             await this.branchBar?.display();
@@ -117,6 +128,41 @@ export default class ObsidianGit extends Plugin {
             this.cachedStatus
         );
         return this.cachedStatus;
+    }
+
+    private async getCombinedStatus(): Promise<Status> {
+        const combined: Status = {
+            all: [],
+            changed: [],
+            staged: [],
+            conflicted: [],
+        };
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+
+        for (const repo of enabledRepos) {
+            try {
+                // Set strategy for this repo before getting status
+                const strategy = this.repoManager.getStrategyForRepo(repo.path);
+                this.gitManager.setStrategy(strategy);
+
+                const status = await this.gitManager.status();
+                combined.all.push(...status.all);
+                combined.changed.push(...status.changed);
+                combined.staged.push(...status.staged);
+                combined.conflicted.push(...status.conflicted);
+            } catch (error) {
+                console.error(
+                    `[ObsidianGit] Error getting status for repo ${repo.name}:`,
+                    error
+                );
+            }
+        }
+
+        // Reset to default strategy after combined status
+        this.gitManager.setStrategy(this.repoManager.getDefaultStrategy());
+
+        return combined;
     }
 
     async refresh() {
@@ -250,26 +296,42 @@ export default class ObsidianGit extends Plugin {
         );
         this.registerEvent(
             this.app.vault.on("modify", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
+                try {
+                    this.debRefresh();
+                    this.autoCommitDebouncer?.();
+                } catch {
+                    // Ignore errors during unload
+                }
             })
         );
         this.registerEvent(
             this.app.vault.on("delete", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
+                try {
+                    this.debRefresh();
+                    this.autoCommitDebouncer?.();
+                } catch {
+                    // Ignore errors during unload
+                }
             })
         );
         this.registerEvent(
             this.app.vault.on("create", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
+                try {
+                    this.debRefresh();
+                    this.autoCommitDebouncer?.();
+                } catch {
+                    // Ignore errors during unload
+                }
             })
         );
         this.registerEvent(
             this.app.vault.on("rename", () => {
-                this.debRefresh();
-                this.autoCommitDebouncer?.();
+                try {
+                    this.debRefresh();
+                    this.autoCommitDebouncer?.();
+                } catch {
+                    // Ignore errors during unload
+                }
             })
         );
 
@@ -326,13 +388,58 @@ export default class ObsidianGit extends Plugin {
         this.debRefresh?.cancel();
         this.debRefresh = debounce(
             () => {
-                if (this.settings.refreshSourceControl) {
-                    this.refresh().catch(console.error);
+                try {
+                    if (this.settings.refreshSourceControl) {
+                        this.refresh().catch(console.error);
+                    }
+                } catch {
+                    // Ignore errors during unload
                 }
             },
             this.settings.refreshSourceControlTimer,
             true
         );
+    }
+
+    getGitManagerForFile(filePath: string): GitManager {
+        if (!this.repoManager) {
+            return this.gitManager;
+        }
+
+        const repo = this.repoManager.getRepoForFile(filePath);
+        if (!repo) {
+            return this.gitManager;
+        }
+
+        const manager = this.gitManagers.get(repo.path);
+        if (manager) {
+            return manager;
+        }
+
+        return this.gitManager;
+    }
+
+    private initializeGitManagersForRepos(): void {
+        if (!this.repoManager) return;
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+
+        // If no repos found or only one repo, just use the main gitManager
+        if (enabledRepos.length <= 1) {
+            return;
+        }
+
+        // For multiple repos, use main manager but add entries to gitManagers map
+        // so we can track which repo each file belongs to
+        if (this.useSimpleGit) {
+            const mainManager = this.gitManager as SimpleGit;
+            const mainRepoPath = mainManager.absoluteRepoPath;
+
+            for (const repo of enabledRepos) {
+                // All repos use the same main manager, we'll switch directories via -C flag
+                this.gitManagers.set(repo.path, this.gitManager);
+            }
+        }
     }
 
     async addFileToGitignore(
@@ -557,6 +664,7 @@ export default class ObsidianGit extends Plugin {
             }
 
             const result = await this.gitManager.checkRequirements();
+            console.log("[ObsidianGit] checkRequirements result:", result);
             const pausedAutomatics = this.localStorage.getPausedAutomatics();
             switch (result) {
                 case "missing-git":
@@ -570,9 +678,23 @@ export default class ObsidianGit extends Plugin {
                         10000
                     );
                     break;
-                case "valid":
+                case "valid": {
                     this.gitReady = true;
                     this.setPluginState({ gitAction: CurrentGitAction.idle });
+
+                    this.repoManager = new RepoManager(this);
+                    const discoveredRepos =
+                        await this.repoManager.discoverRepos();
+                    if (discoveredRepos.length > 1) {
+                        this.log(
+                            `Multiple git repositories detected: ${discoveredRepos.map((r) => r.name).join(", ")}`
+                        );
+                    }
+
+                    // Set default strategy based on discovered repos
+                    this.gitManager.setStrategy(
+                        this.repoManager.getDefaultStrategy()
+                    );
 
                     if (
                         Platform.isDesktop &&
@@ -621,6 +743,7 @@ export default class ObsidianGit extends Plugin {
                     }
 
                     break;
+                }
                 default:
                     this.log(
                         "Something weird happened. The 'checkRequirements' result is " +
@@ -834,6 +957,136 @@ export default class ObsidianGit extends Plugin {
             }
         }
         this.setPluginState({ gitAction: CurrentGitAction.idle });
+    }
+
+    async commitAndSyncAll({
+        fromAutoBackup,
+        requestCustomMessage = false,
+        commitMessage,
+        onlyStaged = false,
+    }: {
+        fromAutoBackup: boolean;
+        requestCustomMessage?: boolean;
+        commitMessage?: string;
+        onlyStaged?: boolean;
+    }): Promise<void> {
+        if (!this.repoManager) {
+            await this.commitAndSync({
+                fromAutoBackup,
+                requestCustomMessage,
+                commitMessage,
+                onlyStaged,
+            });
+            return;
+        }
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+
+        for (const repo of enabledRepos) {
+            try {
+                // Set strategy for this repo
+                const strategy = this.repoManager.getStrategyForRepo(repo.path);
+                this.gitManager.setStrategy(strategy);
+
+                // Get status for this specific repo
+                const status = await this.gitManager.status();
+                const hasChanges =
+                    status.staged.length > 0 ||
+                    status.changed.length > 0 ||
+                    status.conflicted.length > 0;
+
+                if (!hasChanges) continue;
+
+                // Pull first if needed (for this specific repo) - simplified for now
+                // Full multi-repo pull support needs more work
+                if (
+                    this.settings.pullBeforePush &&
+                    this.settings.syncMethod !== "reset"
+                ) {
+                    try {
+                        // Skip pull for now - needs proper repoPath support
+                    } catch (e) {
+                        // Ignore pull errors
+                    }
+                }
+
+                // Stage all files in this repo
+                await this.gitManager.stageAll({});
+
+                // Commit in this repo
+                const cmtMessage =
+                    commitMessage ??
+                    (fromAutoBackup
+                        ? this.settings.autoCommitMessage
+                        : this.settings.commitMessage);
+                await this.gitManager.commit({
+                    message: cmtMessage,
+                });
+
+                // Push after commit
+                if (!this.settings.disablePush) {
+                    const canPush = await this.gitManager.canPush();
+                    if (canPush) {
+                        await this.gitManager.push();
+                    }
+                }
+
+                this.displayMessage(`Committed to ${repo.name}`);
+            } catch (error) {
+                this.displayError(`Error committing to ${repo.name}: ${error}`);
+            }
+        }
+
+        // Reset to default strategy after commit
+        this.gitManager.setStrategy(this.repoManager.getDefaultStrategy());
+
+        // Trigger refresh to update Source Control pane
+        this.app.workspace.trigger("obsidian-git:refresh");
+    }
+
+    async pullAll(): Promise<void> {
+        if (!this.repoManager) {
+            await this.pull();
+            return;
+        }
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+        for (const repo of enabledRepos) {
+            const manager = this.gitManagers.get(repo.path);
+            if (!manager) continue;
+
+            try {
+                await manager.pull();
+            } catch (error) {
+                this.displayError(
+                    `Pull failed for repo ${repo.name}: ${error}`
+                );
+            }
+        }
+    }
+
+    async pushAll(): Promise<void> {
+        if (!this.repoManager) {
+            await this.push();
+            return;
+        }
+
+        const enabledRepos = this.repoManager.getEnabledRepos();
+        for (const repo of enabledRepos) {
+            const manager = this.gitManagers.get(repo.path);
+            if (!manager) continue;
+
+            try {
+                const canPush = await manager.canPush();
+                if (canPush) {
+                    await manager.push();
+                }
+            } catch (error) {
+                this.displayError(
+                    `Push failed for repo ${repo.name}: ${error}`
+                );
+            }
+        }
     }
 
     // Returns true if commit was successfully

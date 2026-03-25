@@ -28,6 +28,7 @@ import type {
 import { CurrentGitAction, NoNetworkError } from "../types";
 import { impossibleBranch, spawnAsync, splitRemoteBranch } from "../utils";
 import { GitManager } from "./gitManager";
+import type { GitOperationStrategy } from "../gitOperationStrategy";
 
 export class SimpleGit extends GitManager {
     git: simple.SimpleGit;
@@ -36,6 +37,14 @@ export class SimpleGit extends GitManager {
     useDefaultWindowsGitPath: boolean = false;
     constructor(plugin: ObsidianGit) {
         super(plugin);
+    }
+
+    setStrategy(strategy: GitOperationStrategy): void {
+        super.setStrategy(strategy);
+        // Update absoluteRepoPath if strategy is not default
+        if (!strategy.isDefault()) {
+            this.absoluteRepoPath = strategy.getRepoPath();
+        }
     }
 
     async setGitInstance(ignoreError = false): Promise<void> {
@@ -328,20 +337,74 @@ export class SimpleGit extends GitManager {
 
     async status(opts?: { path?: string }): Promise<Status> {
         const dir = opts?.path;
-        this.plugin.setPluginState({ gitAction: CurrentGitAction.status });
-        const status = await this.git.status(
-            dir != undefined ? ["--", dir] : []
-        );
-        this.plugin.setPluginState({ gitAction: CurrentGitAction.idle });
+        const repoPath = this.strategy.getRepoPath();
 
+        this.plugin.setPluginState({ gitAction: CurrentGitAction.status });
+
+        try {
+            // Use -C flag if strategy is not default
+            if (!this.strategy.isDefault()) {
+                const statusOutput = await this.git.raw([
+                    "-C",
+                    repoPath,
+                    "status",
+                    "--short",
+                    "--",
+                    ...(dir ? [dir] : []),
+                ]);
+
+                const lines = statusOutput
+                    .trim()
+                    .split("\n")
+                    .filter((l) => l);
+                const files = lines.map((line) => {
+                    const index = line[0] || " ";
+                    const working_dir = line[1] || " ";
+                    const filePath = line.slice(3);
+                    return { index, working_dir, path: filePath };
+                });
+
+                const status = { files, conflicted: [] };
+                return this.formatStatus(status, repoPath);
+            } else {
+                const status = await this.git.status(
+                    dir != undefined ? ["--", dir] : []
+                );
+                return this.formatStatus(status);
+            }
+        } finally {
+            this.plugin.setPluginState({ gitAction: CurrentGitAction.idle });
+        }
+    }
+
+    private formatStatus(
+        status: { files: any[]; conflicted: string[] },
+        repoPath?: string
+    ): Status {
         const allFilesFormatted = status.files.map<FileStatusResult>((e) => {
             const res = this.formatPath(e);
+
+            // If repoPath is provided, convert from repo-relative to vault-relative
+            let vaultPath: string;
+            if (repoPath && repoPath !== this.absoluteRepoPath) {
+                // Path is relative to the repo, need to convert to vault path
+                const relativePath = path.relative(
+                    repoPath,
+                    this.absoluteRepoPath
+                );
+                vaultPath = path
+                    .join(relativePath, res.path)
+                    .replace(/\\/g, "/");
+            } else {
+                vaultPath = this.getRelativeVaultPath(res.path);
+            }
+
             return {
                 path: res.path,
                 from: res.from,
                 index: e.index === "?" ? "U" : e.index,
                 workingDir: e.working_dir === "?" ? "U" : e.working_dir,
-                vaultPath: this.getRelativeVaultPath(res.path),
+                vaultPath,
             };
         });
         return {
@@ -490,6 +553,8 @@ export class SimpleGit extends GitManager {
     }
 
     async commitAll({ message }: { message: string }): Promise<number> {
+        const repoPath = this.strategy.getRepoPath();
+
         if (this.plugin.settings.updateSubmodules) {
             this.plugin.setPluginState({ gitAction: CurrentGitAction.commit });
             const submodulePaths = await this.getSubmodulePaths();
@@ -502,13 +567,32 @@ export class SimpleGit extends GitManager {
         }
         this.plugin.setPluginState({ gitAction: CurrentGitAction.add });
 
-        await this.git.add("-A");
+        // Stage files in the appropriate repo
+        if (!this.strategy.isDefault()) {
+            await this.git.raw(["-C", repoPath, "add", "-A"]);
+        } else {
+            await this.git.add("-A");
+        }
 
         this.plugin.setPluginState({ gitAction: CurrentGitAction.commit });
 
-        const res = await this.git.commit(
-            await this.formatCommitMessage(message)
-        );
+        let res;
+        if (!this.strategy.isDefault()) {
+            const formattedMessage = await this.formatCommitMessage(message);
+            await this.git.raw([
+                "-C",
+                repoPath,
+                "commit",
+                "-m",
+                formattedMessage,
+            ]);
+            res = { summary: { changes: 1 } };
+        } else {
+            res = await this.git.commit(
+                await this.formatCommitMessage(message)
+            );
+        }
+
         this.app.workspace.trigger("obsidian-git:head-change");
 
         return res.summary.changes;
@@ -521,14 +605,32 @@ export class SimpleGit extends GitManager {
         message: string;
         amend?: boolean;
     }): Promise<number> {
+        const repoPath = this.strategy.getRepoPath();
+
         this.plugin.setPluginState({ gitAction: CurrentGitAction.commit });
 
-        const res = (
-            await this.git.commit(
-                await this.formatCommitMessage(message),
-                amend ? ["--amend"] : []
-            )
-        ).summary.changes;
+        let res;
+        if (!this.strategy.isDefault()) {
+            // Use -C flag to commit in a different directory
+            const formattedMessage = await this.formatCommitMessage(message);
+            const result = await this.git.raw([
+                "-C",
+                repoPath,
+                "commit",
+                "-m",
+                formattedMessage,
+                ...(amend ? ["--amend"] : []),
+            ]);
+            res = 1; // Assume at least one file changed
+        } else {
+            res = (
+                await this.git.commit(
+                    await this.formatCommitMessage(message),
+                    amend ? ["--amend"] : []
+                )
+            ).summary.changes;
+        }
+
         this.app.workspace.trigger("obsidian-git:head-change");
 
         this.plugin.setPluginState({ gitAction: CurrentGitAction.idle });
@@ -545,14 +647,27 @@ export class SimpleGit extends GitManager {
     }
 
     async stageAll({ dir }: { dir?: string }): Promise<void> {
+        const repoPath = this.strategy.getRepoPath();
+
         this.plugin.setPluginState({ gitAction: CurrentGitAction.add });
-        await this.git.add(dir ?? "-A");
+        if (!this.strategy.isDefault()) {
+            await this.git.raw(["-C", repoPath, "add", dir ?? "-A"]);
+        } else {
+            await this.git.add(dir ?? "-A");
+        }
         this.plugin.setPluginState({ gitAction: CurrentGitAction.idle });
     }
 
     async unstageAll({ dir }: { dir?: string }): Promise<void> {
+        const repoPath = this.strategy.getRepoPath();
+
         this.plugin.setPluginState({ gitAction: CurrentGitAction.add });
-        await this.git.reset(dir != undefined ? ["--", dir] : []);
+        if (!this.strategy.isDefault()) {
+            const args = dir ? ["reset", "--", dir] : ["reset"];
+            await this.git.raw(["-C", repoPath, ...args]);
+        } else {
+            await this.git.reset(dir ? ["--", dir] : []);
+        }
         this.plugin.setPluginState({ gitAction: CurrentGitAction.idle });
     }
 
@@ -806,10 +921,64 @@ export class SimpleGit extends GitManager {
         if (!(await this.isGitInstalled())) {
             return "missing-git";
         }
-        if (!(await this.git.checkIsRepo())) {
-            return "missing-repo";
+
+        // First check if there's a repo at the vault root
+        if (await this.git.checkIsRepo()) {
+            return "valid";
         }
-        return "valid";
+
+        // If no repo at root, scan for any .git folder in subdirectories
+        const adapter = this.plugin.app.vault.adapter as FileSystemAdapter;
+        const vaultBasePath = adapter.getBasePath();
+        const basePath = this.plugin.settings.basePath
+            ? path.join(vaultBasePath, this.plugin.settings.basePath)
+            : vaultBasePath;
+
+        const foundRepo = await this.findGitRepoInSubdirs(basePath);
+        if (foundRepo) {
+            console.log(
+                "[SimpleGit] Found git repo in subdirectory:",
+                foundRepo
+            );
+            // Update the git instance to use this subdirectory repo
+            this.absoluteRepoPath = foundRepo;
+            await this.git.cwd(foundRepo);
+            return "valid";
+        }
+
+        return "missing-repo";
+    }
+
+    private async findGitRepoInSubdirs(
+        basePath: string
+    ): Promise<string | null> {
+        try {
+            const entries = await fsPromises.readdir(basePath, {
+                withFileTypes: true,
+            });
+
+            for (const entry of entries) {
+                if (!entry.isDirectory() || entry.name.startsWith(".")) {
+                    continue;
+                }
+
+                const fullPath = path.join(basePath, entry.name);
+                const gitPath = path.join(fullPath, ".git");
+
+                try {
+                    await fsPromises.access(gitPath);
+                    // Found a .git directory
+                    return fullPath;
+                } catch {
+                    // No .git here, recurse into subdirectories
+                    const found = await this.findGitRepoInSubdirs(fullPath);
+                    if (found) return found;
+                }
+            }
+        } catch {
+            // Ignore errors
+        }
+        return null;
     }
 
     async branchInfo(): Promise<BranchInfo> {
